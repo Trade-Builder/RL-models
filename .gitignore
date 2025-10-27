@@ -19,11 +19,9 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -38,37 +36,15 @@ pip-delete-this-directory.txt
 # Unit test / coverage reports
 htmlcov/
 .tox/
+.nox/
 .coverage
 .coverage.*
 .cache
+.pytest_cache/
 nosetests.xml
 coverage.xml
 *.cover
-.hypothesis/
-.pytest_cache/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-.static_storage/
-.media/
-local_settings.py
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
+*.py,cover
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -76,11 +52,17 @@ target/
 # pyenv
 .python-version
 
-# celery beat schedule file
-celerybeat-schedule
+# VS Code
+.vscode/
 
-# SageMath parsed files
-*.sage.py
+# IDEs
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
 
 # Environments
 .env
@@ -88,31 +70,23 @@ celerybeat-schedule
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
 
-# Spyder project settings
-.spyderproject
-.spyproject
+# Data and outputs (do not commit large runtime artifacts)
+data/
+output/
 
-# Rope project settings
-.ropeproject
+# Models: ignore all model files by default. Allow a single 'best' folder to be tracked.
+models/*.mdl
+models/*.pt
+!models/best/
+!models/best/*.mdl
 
-# mkdocs documentation
-/site
+# Logs
+*.log
 
-# mypy
-.mypy_cache/
+# Misc
+*.sqlite
+*.db
 
-/output/
-/etc/
-/.idea/
-/.vscode/
-/data/v4/
-/nb/
-note.md
-/models/*.mdl
-profile.pstats
-profile.txt
-bat.cmd
-/backup/
+# Allow developers to opt-in a README or small dataset
+# data/example.csv
