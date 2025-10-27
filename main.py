@@ -23,6 +23,8 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--discount_factor', type=float, default=0.7)
     parser.add_argument('--balance', type=int, default=100000000)
+    parser.add_argument('--force_action', action='store_true', help='If set, override HOLD to BUY/SELL when possible')
+    parser.add_argument('--num_epoches', type=int, default=1000, help='Number of training epochs when mode is train/update')
     args = parser.parse_args()
 
     # 학습기 파라미터 설정
@@ -32,7 +34,7 @@ if __name__ == '__main__':
     value_network_name = f'{args.name}_{args.rl_method}_{args.net}_value.mdl'
     policy_network_name = f'{args.name}_{args.rl_method}_{args.net}_policy.mdl'
     start_epsilon = 1 if args.mode in ['train', 'update'] else 0
-    num_epoches = 1000 if args.mode in ['train', 'update'] else 1
+    num_epoches = args.num_epoches if args.mode in ['train', 'update'] else 1
     num_steps = 5 if args.net in ['lstm', 'cnn'] else 1
 
     # Backend 설정
@@ -85,9 +87,24 @@ if __name__ == '__main__':
     list_max_trading_price = []
 
     for stock_code in args.stock_code:
-        # 차트 데이터, 학습 데이터 준비
-        chart_data, training_data = data_manager.load_data(
-            stock_code, args.start_date, args.end_date, ver=args.ver)
+        # 차트 데이터, 학습 데이터 준비 (crypto)
+        # 파일 경로는 data/{symbol}_hourly.csv 형식으로 가정
+        chart_data = data_manager.load_crypto_data(
+            fpath=f'data/{stock_code}_hourly.csv',
+            date_from=args.start_date,
+            date_to=args.end_date
+        )
+
+        # 전처리
+        chart_data = data_manager.preprocess_crypto_data(chart_data)
+
+        # training_data로 사용할 수 있는 피처 컬럼이 있으면 선택하고, 없으면 전체 복사본 사용
+        # 날짜 컬럼('date')는 학습 피처에서 제외
+        cols = [c for c in data_manager.COLUMNS_CRYPTO_DATA if c in chart_data.columns and c != 'date']
+        if len(cols) > 0:
+            training_data = chart_data[cols]
+        else:
+            training_data = chart_data.copy()
 
         assert len(chart_data) >= num_steps
         
@@ -100,7 +117,20 @@ if __name__ == '__main__':
             'net': args.net, 'num_steps': num_steps, 'lr': args.lr,
             'balance': args.balance, 'num_epoches': num_epoches, 
             'discount_factor': args.discount_factor, 'start_epsilon': start_epsilon,
-            'output_path': output_path, 'reuse_models': reuse_models}
+            'output_path': output_path, 'reuse_models': reuse_models,
+            # 강제 행동 옵션: 결정이 HOLD일 때 가능한 경우 BUY/SELL로 강제합니다.
+            'force_action': bool(args.force_action)}
+
+        # force_action이 켜져 있으면, 테스트/실행 시 매수 여건을 만들기 위해
+        # 초기 잔고를 차트의 최대 종가 기준으로 충분히 확보합니다.
+        if common_params.get('force_action'):
+            try:
+                max_price = int(chart_data['close'].max())
+                # 기본 잔고보다 작으면 충분한 잔고로 설정 (최대가격 * 2)
+                if common_params['balance'] < max_price:
+                    common_params['balance'] = max(common_params['balance'], max_price * 2)
+            except Exception:
+                pass
 
         # 강화학습 시작
         learner = None

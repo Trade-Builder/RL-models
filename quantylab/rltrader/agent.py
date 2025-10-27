@@ -44,6 +44,10 @@ class Agent:
         self.ratio_hold = 0  # 주식 보유 비율
         self.profitloss = 0  # 현재 손익
         self.avg_buy_price = 0  # 주당 매수 단가
+        # 최소 거래 단위(수량, 주식 수 기준). 암호화폐는 소수점 거래 가능하므로
+        # 기본값을 작은 소수로 설정. 단위는 '주식 수'이며, 실제 거래 금액은
+        # trading_unit * price로 계산됩니다.
+        self.min_trading_unit = 0.000001
 
     def reset(self):
         self.balance = self.initial_balance
@@ -107,8 +111,8 @@ class Agent:
 
     def validate_action(self, action):
         if action == Agent.ACTION_BUY:
-            # 적어도 1주를 살 수 있는지 확인
-            if self.balance < self.environment.get_price() * (1 + self.TRADING_CHARGE):
+            # 암호화폐의 경우 소수점 거래를 허용하므로 최소 단위로 살 수 있는지 확인
+            if self.balance < self.environment.get_price() * (1 + self.TRADING_CHARGE) * self.min_trading_unit:
                 return False
         elif action == Agent.ACTION_SELL:
             # 주식 잔고가 있는지 확인
@@ -117,63 +121,71 @@ class Agent:
         return True
 
     def decide_trading_unit(self, confidence):
+        # 반환값: 거래할 '수량' (부동소수)
         if np.isnan(confidence):
-            return self.min_trading_price
-        added_trading_price = max(min(
-            int(confidence * (self.max_trading_price - self.min_trading_price)),
-            self.max_trading_price-self.min_trading_price), 0)
-        trading_price = self.min_trading_price + added_trading_price
-        return max(int(trading_price / self.environment.get_price()), 1)
+            # 최소 단위로 거래
+            return self.min_trading_unit
+
+        # confidence에 따라 화폐 단위로 거래 금액을 산정
+        trade_amount_money = self.min_trading_price + confidence * (self.max_trading_price - self.min_trading_price)
+        # 거래 수량 = 금액 / 현재 가격
+        unit = trade_amount_money / self.environment.get_price()
+        # 제한: 최소 단위 이상, 최대 단위 이하
+        unit = max(unit, self.min_trading_unit)
+        unit = min(unit, max(self.max_trading_price / self.environment.get_price(), unit))
+        return unit
 
     def act(self, action, confidence):
         if not self.validate_action(action):
             action = Agent.ACTION_HOLD
+
+        # 이전 포트폴리오 가치 저장 (보상 계산용)
+        prev_portfolio_value = self.portfolio_value
 
         # 환경에서 현재 가격 얻기
         curr_price = self.environment.get_price()
 
         # 매수
         if action == Agent.ACTION_BUY:
-            # 매수할 단위를 판단
-            trading_unit = self.decide_trading_unit(confidence)
-            balance = (
-                self.balance - curr_price *
-                (1 + self.TRADING_CHARGE) * trading_unit
-            )
-            # 보유 현금이 모자랄 경우 보유 현금으로 가능한 만큼 최대한 매수
-            if balance < 0:
-                trading_unit = min(
-                    int(self.balance / (curr_price * (1 + self.TRADING_CHARGE))),
-                    int(self.max_trading_price / curr_price)
-                )
+            trading_unit = float(self.decide_trading_unit(confidence))
+            # 사용할 수 있는 최대 단위 (잔고/가격 기준)
+            max_affordable = self.balance / (curr_price * (1 + self.TRADING_CHARGE))
+            max_by_price = self.max_trading_price / curr_price
+            # 실제 거래 단위는 affordability와 가격 제한을 고려
+            trading_unit = min(trading_unit, max_affordable, max_by_price)
             # 수수료를 적용하여 총 매수 금액 산정
             invest_amount = curr_price * (1 + self.TRADING_CHARGE) * trading_unit
-            if invest_amount > 0:
-                self.avg_buy_price = \
-                    (self.avg_buy_price * self.num_stocks + curr_price * trading_unit) \
-                        / (self.num_stocks + trading_unit)  # 주당 매수 단가 갱신
-                self.balance -= invest_amount  # 보유 현금을 갱신
-                self.num_stocks += trading_unit  # 보유 주식 수를 갱신
-                self.num_buy += 1  # 매수 횟수 증가
+            if invest_amount > 0 and trading_unit >= self.min_trading_unit:
+                # avg_buy_price 업데이트 (부동소수 지원)
+                if self.num_stocks + trading_unit > 0:
+                    self.avg_buy_price = (
+                        (self.avg_buy_price * self.num_stocks + curr_price * trading_unit)
+                        / (self.num_stocks + trading_unit)
+                    )
+                else:
+                    self.avg_buy_price = curr_price
+                self.balance -= invest_amount
+                self.num_stocks += trading_unit
+                self.num_buy += 1
 
         # 매도
         elif action == Agent.ACTION_SELL:
-            # 매도할 단위를 판단
-            trading_unit = self.decide_trading_unit(confidence)
+            trading_unit = float(self.decide_trading_unit(confidence))
             # 보유 주식이 모자랄 경우 가능한 만큼 최대한 매도
             trading_unit = min(trading_unit, self.num_stocks)
-            # 매도
-            invest_amount = curr_price * (
-                1 - (self.TRADING_TAX + self.TRADING_CHARGE)) * trading_unit
-            if invest_amount > 0:
-                # 주당 매수 단가 갱신
-                self.avg_buy_price = \
-                    (self.avg_buy_price * self.num_stocks - curr_price * trading_unit) \
-                        / (self.num_stocks - trading_unit) \
-                            if self.num_stocks > trading_unit else 0
-                self.num_stocks -= trading_unit  # 보유 주식 수를 갱신
-                self.balance += invest_amount  # 보유 현금을 갱신
-                self.num_sell += 1  # 매도 횟수 증가
+            invest_amount = curr_price * (1 - (self.TRADING_TAX + self.TRADING_CHARGE)) * trading_unit
+            if invest_amount > 0 and trading_unit >= self.min_trading_unit:
+                # avg_buy_price 업데이트
+                if self.num_stocks - trading_unit > 0:
+                    self.avg_buy_price = (
+                        (self.avg_buy_price * self.num_stocks - curr_price * trading_unit)
+                        / (self.num_stocks - trading_unit)
+                    )
+                else:
+                    self.avg_buy_price = 0
+                self.num_stocks -= trading_unit
+                self.balance += invest_amount
+                self.num_sell += 1
 
         # 관망
         elif action == Agent.ACTION_HOLD:
@@ -182,4 +194,7 @@ class Agent:
         # 포트폴리오 가치 갱신
         self.portfolio_value = self.balance + curr_price * self.num_stocks
         self.profitloss = self.portfolio_value / self.initial_balance - 1
-        return self.profitloss
+
+        # 보상: 직전 단계 대비 포트폴리오 가치 변화량을 초기 자본으로 정규화
+        reward = (self.portfolio_value - prev_portfolio_value) / float(self.initial_balance)
+        return reward

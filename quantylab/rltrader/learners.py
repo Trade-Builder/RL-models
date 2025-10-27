@@ -29,7 +29,7 @@ class ReinforcementLearner:
                 discount_factor=0.9, num_epoches=1000,
                 balance=100000000, start_epsilon=1,
                 value_network=None, policy_network=None,
-                output_path='', reuse_models=True):
+                output_path='', reuse_models=True, force_action=False):
         # 인자 확인
         assert min_trading_price > 0
         assert max_trading_price > 0
@@ -64,6 +64,8 @@ class ReinforcementLearner:
         self.reuse_models = reuse_models
         # 가시화 모듈
         self.visualizer = Visualizer()
+        # 강제 행동 여부: 결정 결과가 HOLD일 때 가능한 경우 BUY/SELL로 강제함
+        self.force_action = force_action
         # 메모리
         self.memory_sample = []
         self.memory_action = []
@@ -270,6 +272,14 @@ class ReinforcementLearner:
                 # 신경망 또는 탐험에 의한 행동 결정
                 action, confidence, exploration = \
                     self.agent.decide_action(pred_value, pred_policy, epsilon)
+
+                # force_action 옵션이 켜져 있으면, 신경망이 HOLD를 선택한 경우 가능한 경우 BUY/SELL로 강제
+                if getattr(self, 'force_action', False) and action == self.agent.ACTION_HOLD:
+                    # 보유 주식이 있으면 SELL 시도, 아니면 BUY 시도
+                    if self.agent.num_stocks > 0 and self.agent.validate_action(self.agent.ACTION_SELL):
+                        action = self.agent.ACTION_SELL
+                    elif self.agent.validate_action(self.agent.ACTION_BUY):
+                        action = self.agent.ACTION_BUY
 
                 # 결정한 행동을 수행하고 보상 획득
                 reward = self.agent.act(action, confidence)

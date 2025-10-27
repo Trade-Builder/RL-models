@@ -111,7 +111,14 @@ class Network:
 
     def load_model(self, model_path):
         if model_path is not None:
-            self.model = torch.load(model_path)
+            # torch.load in newer PyTorch defaults to weights_only=True which may
+            # reject full-model checkpoints saved previously. Set weights_only=False
+            # to preserve backward compatibility (trusted local file).
+            try:
+                self.model = torch.load(model_path, weights_only=False)
+            except TypeError:
+                # older torch versions don't have weights_only arg
+                self.model = torch.load(model_path)
     
 class DNN(Network):
     @staticmethod
