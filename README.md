@@ -4,8 +4,12 @@
 
 > 이 README는 2025-10-28 기준으로 작성되었습니다. 최근 수정 내용과 현재 동작 상태, 테스트 방법을 자세히 포함합니다.
 
-## 요약 — 핵심 기능
-- Multi-timeframe 입력 지원: 여러 TF(예: 1m,5m,15m,1h,4h,1d)에서 N개의 최근 종가/거래량을 받아 동일한 전처리(지표)를 수행합니다.
+## 요약 — 핵심 기능 및 Best 성능
+- **Best 모델**: `20251027124731_a2c_dnn` (Max PV: **137,989,972원 / 38% 수익**)
+  - 방식: A2C + DNN, 단일 시간봉(hourly), 2000 epochs
+  - 학습 파라미터: LR=0.0005, DF=0.95
+  - 위치: `models/best/20251027124731_a2c_dnn_*.mdl`
+- Multi-timeframe 입력 지원: 여러 TF(예: 1m,5m,15m,1h,4h,1d)에서 N개의 최근 종가/거래량을 받아 동일한 전처리(지표)를 수행합니다 (실험적).
 - 학습: A2C/ PPO 등 강화학습 루틴이 포함되어 있으며, PyTorch 기반 네트워크 래퍼를 사용합니다.
 - 배포: `quantylab/rltrader/deployer.py`의 `ModelDeployer`로 실시간/시뮬레이션 추론이 가능합니다.
 
@@ -35,20 +39,33 @@ python -m pip install -r requirements_common.txt
 
 2) 수집 (pyupbit 사용 시)
 
+**Best 모델 방식 데이터 수집 (단일 시간봉, 권장)**:
+```powershell
+.\scripts\collect_best_style_data.ps1
+```
+
+Multi-TF 수집 (실험용):
 ```powershell
 python main.py --mode collect --stock_code KRW-BTC --days 90 --tf_intervals minute1,minute5,minute15,hour1,hour4,day
 ```
 
-3) 학습 (smoke / 장기 예시)
+3) 학습 (권장: Best 모델 방식)
 
-단기 smoke (테스트용):
+**Best 모델 방식 (Max PV: 137,989,972 / 38% 수익 달성)**:
 ```powershell
-$env:PYTHONPATH = 'C:\Users\user\Desktop\RL\EC 해커톤\rltrader'; python scripts\run_ppo_smoke.py
+# 가장 좋은 성능을 보인 설정 (A2C + DNN, 단일 시간봉)
+.\scripts\train_best_model_style.ps1
 ```
 
-장기 학습 예시 (PPO, multi-TF):
+또는 직접 실행:
 ```powershell
-$env:PYTHONPATH = 'C:\Users\user\Desktop\RL\EC 해커톤\rltrader'; python main.py --mode train --rl_method ppo --net dnn --stock_code KRW-BTC --multi_tf --days 90 --tf_intervals minute1,minute5,minute15,hour1,hour4,day --num_epoches 2000 --lr 0.0003 --name ppo_long_20251028
+$env:PYTHONPATH = 'C:\Users\user\Desktop\RL\EC 해커톤\rltrader'
+python main.py --mode train --rl_method a2c --net dnn --stock_code KRW-BTC --start_date 20240101 --end_date 20251026 --lr 0.0005 --discount_factor 0.95 --num_epoches 2000 --name a2c_best_$(Get-Date -Format 'yyyyMMddHHmmss')
+```
+
+단기 smoke 테스트:
+```powershell
+$env:PYTHONPATH = 'C:\Users\user\Desktop\RL\EC 해커톤\rltrader'; python scripts\run_ppo_smoke.py
 ```
 
 4) 테스트/백테스트
