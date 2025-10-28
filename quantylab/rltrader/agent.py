@@ -64,8 +64,12 @@ class Agent:
         self.initial_balance = balance
 
     def get_states(self):
-        self.ratio_hold = self.num_stocks * self.environment.get_price() \
-            / self.portfolio_value
+        # protect against division by zero when portfolio_value is 0
+        price = self.environment.get_price()
+        if self.portfolio_value <= 0 or price <= 0:
+            self.ratio_hold = 0
+        else:
+            self.ratio_hold = self.num_stocks * price / self.portfolio_value
         return (
             self.ratio_hold,
             self.profitloss,
@@ -129,10 +133,14 @@ class Agent:
         # confidence에 따라 화폐 단위로 거래 금액을 산정
         trade_amount_money = self.min_trading_price + confidence * (self.max_trading_price - self.min_trading_price)
         # 거래 수량 = 금액 / 현재 가격
-        unit = trade_amount_money / self.environment.get_price()
+        price = self.environment.get_price()
+        # guard: avoid division by zero or invalid price
+        if price is None or price <= 0:
+            return self.min_trading_unit
+        unit = trade_amount_money / price
         # 제한: 최소 단위 이상, 최대 단위 이하
         unit = max(unit, self.min_trading_unit)
-        unit = min(unit, max(self.max_trading_price / self.environment.get_price(), unit))
+        unit = min(unit, max(self.max_trading_price / price, unit))
         return unit
 
     def act(self, action, confidence):

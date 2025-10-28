@@ -188,8 +188,17 @@ class ReinforcementLearner:
         self.memory_action = [Agent.ACTION_HOLD] * (self.num_steps - 1) + self.memory_action
         self.memory_num_stocks = [0] * (self.num_steps - 1) + self.memory_num_stocks
         if self.value_network is not None:
-            self.memory_value = [np.array([np.nan] * len(Agent.ACTIONS))] \
-                                * (self.num_steps - 1) + self.memory_value
+            # value_network may output per-action values or a scalar value (critic)
+            if len(self.memory_value) > 0 and np.array(self.memory_value[0]).size == 1:
+                # scalar value or length-1 array -> replicate to match ACTIONS for plotting
+                scalar_vals = [np.array([np.nan] * len(Agent.ACTIONS))] * (self.num_steps - 1)
+                for v in self.memory_value:
+                    val = float(np.array(v).flatten()[0])
+                    scalar_vals.append(np.array([val] * len(Agent.ACTIONS)))
+                self.memory_value = scalar_vals
+            else:
+                self.memory_value = [np.array([np.nan] * len(Agent.ACTIONS))] \
+                                    * (self.num_steps - 1) + self.memory_value
         if self.policy_network is not None:
             self.memory_policy = [np.array([np.nan] * len(Agent.ACTIONS))] \
                                 * (self.num_steps - 1) + self.memory_policy
@@ -318,7 +327,9 @@ class ReinforcementLearner:
                 f'Loss:{self.loss:.6f} ET:{elapsed_time_epoch:.4f}')
 
             # 에포크 관련 정보 가시화
-            if self.num_epoches == 1 or (epoch + 1) % int(self.num_epoches / 10) == 0:
+            # avoid division by zero for small num_epoches
+            denom = max(1, int(self.num_epoches / 10))
+            if self.num_epoches == 1 or (epoch + 1) % denom == 0:
                 self.visualize(epoch_str, self.num_epoches, epsilon)
 
             # 학습 관련 정보 갱신
@@ -557,3 +568,150 @@ class A3CLearner(ReinforcementLearner):
             thread.start()
         for thread in threads:
             thread.join()
+
+
+class PPOLearner(ReinforcementLearner):
+    """A simple PPO implementation (DNN, num_steps==1).
+
+    NOTE: current implementation supports `net=='dnn'` and `num_steps==1` only.
+    It performs clipped PPO updates on the policy network and MSE update on a
+    scalar critic (value network with output_dim=1).
+    """
+    def __init__(self, *args, clip_epsilon=0.2, ppo_epochs=4, value_coef=0.5, entropy_coef=0.01,
+                 policy_network_path=None, value_network_path=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert self.net == 'dnn', 'PPOLearner currently supports DNN only.'
+        assert self.num_steps == 1, 'PPOLearner currently supports num_steps==1 only.'
+        self.clip_epsilon = clip_epsilon
+        self.ppo_epochs = ppo_epochs
+        self.value_coef = value_coef
+        self.entropy_coef = entropy_coef
+        self.policy_network_path = policy_network_path
+        self.value_network_path = value_network_path
+
+        # initialize networks: policy outputs softmax over actions, value outputs scalar
+        # policy network
+        self.policy_network = None
+        self.value_network = None
+        self.init_policy_network(activation='softmax', loss='mse')
+        # create a critic with scalar output
+        self.value_network = None
+        if self.reuse_models and value_network_path is not None and os.path.exists(value_network_path):
+            # load if existing
+            self.init_value_network(activation='linear', loss='mse')
+        else:
+            # create new critic with output_dim=1
+            if self.net == 'dnn':
+                self.value_network = DNN(input_dim=self.num_features, output_dim=1, lr=self.lr,
+                                         shared_network=None, activation='linear', loss='mse')
+
+    def init_policy_network(self, shared_network=None, activation='softmax', loss='mse'):
+        # override to set softmax activation
+        if self.net == 'dnn':
+            self.policy_network = DNN(
+                input_dim=self.num_features,
+                output_dim=self.agent.NUM_ACTIONS,
+                lr=self.lr, shared_network=shared_network,
+                activation=activation, loss=loss)
+        if self.reuse_models and getattr(self, 'policy_network_path', None) and os.path.exists(self.policy_network_path):
+            try:
+                self.policy_network.load_model(model_path=self.policy_network_path)
+            except Exception:
+                pass
+
+    def fit(self):
+        """Perform PPO update using collected memory."""
+        import torch
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        if len(self.memory_sample) == 0:
+            return
+
+        # prepare arrays
+        x = np.array(self.memory_sample)
+        N = x.shape[0]
+        if self.num_steps == 1:
+            x = x.reshape((N, self.num_features))
+        else:
+            raise NotImplementedError('PPOLearner supports num_steps==1 only')
+
+        actions = np.array(self.memory_action)
+        rewards = np.array(self.memory_reward)
+
+        # old policy probs for taken actions
+        old_probs = []
+        for p, a in zip(self.memory_policy, actions):
+            if p is None:
+                old_probs.append(1.0 / self.agent.NUM_ACTIONS)
+            else:
+                try:
+                    old_probs.append(float(np.array(p).flatten()[int(a)]))
+                except Exception:
+                    old_probs.append(1.0 / self.agent.NUM_ACTIONS)
+        old_probs = np.array(old_probs, dtype=np.float32)
+
+        # compute discounted returns
+        returns = np.zeros(N, dtype=np.float32)
+        running = 0.0
+        for t in range(N - 1, -1, -1):
+            running = rewards[t] + self.discount_factor * running
+            returns[t] = running
+
+        # get current values from critic
+        self.value_network.model.eval()
+        with torch.no_grad():
+            xt = torch.from_numpy(x).float().to(device)
+            values_pred = self.value_network.model(xt).detach().cpu().numpy().flatten()
+
+        advantages = returns - values_pred
+        # normalize advantages for stability
+        if np.std(advantages) > 1e-8:
+            advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-9)
+
+        # convert to tensors
+        actions_t = torch.from_numpy(actions).long().to(device)
+        old_probs_t = torch.from_numpy(old_probs).float().to(device)
+        returns_t = torch.from_numpy(returns).float().to(device)
+        adv_t = torch.from_numpy(advantages).float().to(device)
+
+        # minibatch training
+        batch_size = min(64, N)
+        idxs = np.arange(N)
+
+        for epoch in range(self.ppo_epochs):
+            np.random.shuffle(idxs)
+            for start in range(0, N, batch_size):
+                batch_idx = idxs[start:start + batch_size]
+                xt_batch = xt[batch_idx]
+                actions_batch = actions_t[batch_idx]
+                old_probs_batch = old_probs_t[batch_idx]
+                returns_batch = returns_t[batch_idx]
+                adv_batch = adv_t[batch_idx]
+
+                # forward
+                self.policy_network.model.train()
+                self.value_network.model.train()
+
+                probs = self.policy_network.model(xt_batch)
+                new_probs = probs.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
+                ratio = new_probs / (old_probs_batch + 1e-9)
+
+                surr1 = ratio * adv_batch
+                surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * adv_batch
+                policy_loss = -torch.mean(torch.min(surr1, surr2))
+
+                entropy = -torch.mean(torch.sum(probs * torch.log(probs + 1e-9), dim=1))
+                policy_loss = policy_loss - self.entropy_coef * entropy
+
+                value_preds = self.value_network.model(xt_batch).squeeze(1)
+                value_loss = torch.mean((returns_batch - value_preds) ** 2)
+
+                total_loss = policy_loss + self.value_coef * value_loss
+
+                # update
+                self.policy_network.optimizer.zero_grad()
+                self.value_network.optimizer.zero_grad()
+                total_loss.backward()
+                self.policy_network.optimizer.step()
+                self.value_network.optimizer.step()
+

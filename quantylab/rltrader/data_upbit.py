@@ -34,16 +34,31 @@ class UpbitDataCollector:
         all_data = []
         to_date = datetime.now()
         
-        # interval에 따른 한번에 가져올 캔들 수
+        # interval alias 처리 및 한번에 가져올 캔들 수
+        # 사용자 입력으로 'hour1', 'hour4', 'minute1', 'minute60', 'day' 등이 들어올 수 있으므로
+        # pyupbit에서 사용하는 interval 문자열로 정규화합니다.
+        norm_interval = interval
+        if interval.startswith('hour'):
+            try:
+                hrs = int(interval.replace('hour', ''))
+                norm_interval = f'minute{hrs * 60}'
+            except Exception:
+                norm_interval = 'minute60'
+
         count_per_request = 200
-        
+
         # 필요한 총 요청 횟수 계산
-        if 'minute' in interval:
-            minutes = int(interval.replace('minute', ''))
+        total_candles = None
+        if 'minute' in norm_interval:
+            minutes = int(norm_interval.replace('minute', ''))
             total_candles = (days * 24 * 60) // minutes
-        elif interval == 'day':
+        elif norm_interval == 'day':
             total_candles = days
-        
+
+        if total_candles is None:
+            # 알 수 없는 interval일 경우 기본값으로 하루 단위로 계산
+            total_candles = days
+
         requests_needed = (total_candles // count_per_request) + 1
         
         print(f"총 {requests_needed}번의 요청이 필요합니다...")
@@ -52,7 +67,7 @@ class UpbitDataCollector:
             try:
                 df = pyupbit.get_ohlcv(
                     self.ticker, 
-                    interval=interval, 
+                    interval=norm_interval, 
                     count=count_per_request,
                     to=to_date.strftime("%Y%m%d%H%M%S")
                 )

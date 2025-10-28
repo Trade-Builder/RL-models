@@ -15,11 +15,15 @@ if __name__ == '__main__':
     parser.add_argument('--ver', choices=['v1', 'v2', 'v3', 'v4'], default='v2')
     parser.add_argument('--name', default=utils.get_time_str())
     parser.add_argument('--stock_code', nargs='+')
-    parser.add_argument('--rl_method', choices=['dqn', 'pg', 'ac', 'a2c', 'a3c', 'monkey'])
+    parser.add_argument('--rl_method', choices=['dqn', 'pg', 'ac', 'a2c', 'a3c', 'ppo', 'monkey'])
     parser.add_argument('--net', choices=['dnn', 'lstm', 'cnn', 'monkey'], default='dnn')
     parser.add_argument('--backend', choices=['pytorch', 'tensorflow', 'plaidml'], default='pytorch')
     parser.add_argument('--start_date', default='20200101')
     parser.add_argument('--end_date', default='20201231')
+    parser.add_argument('--multi_tf', action='store_true', help='Use multi-timeframe data collection')
+    parser.add_argument('--days', type=int, default=365, help='Days to collect for multi-tf')
+    parser.add_argument('--tf_intervals', type=str, default='minute1,minute5,minute15,minute60,minute240,day',
+                        help='Comma-separated intervals for multi-tf (e.g. minute1,minute5,minute15,minute60,minute240,day)')
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--discount_factor', type=float, default=0.7)
     parser.add_argument('--balance', type=int, default=100000000)
@@ -77,7 +81,7 @@ if __name__ == '__main__':
     
     # Backend 설정, 로그 설정을 먼저하고 RLTrader 모듈들을 이후에 임포트해야 함
     from quantylab.rltrader.learners import ReinforcementLearner, DQNLearner, \
-        PolicyGradientLearner, ActorCriticLearner, A2CLearner, A3CLearner
+        PolicyGradientLearner, ActorCriticLearner, A2CLearner, A3CLearner, PPOLearner
 
     common_params = {}
     list_stock_code = []
@@ -88,12 +92,16 @@ if __name__ == '__main__':
 
     for stock_code in args.stock_code:
         # 차트 데이터, 학습 데이터 준비 (crypto)
-        # 파일 경로는 data/{symbol}_hourly.csv 형식으로 가정
-        chart_data = data_manager.load_crypto_data(
-            fpath=f'data/{stock_code}_hourly.csv',
-            date_from=args.start_date,
-            date_to=args.end_date
-        )
+        if args.multi_tf:
+            intervals = [s.strip() for s in args.tf_intervals.split(',') if s.strip()]
+            chart_data = data_manager.load_multi_tf_crypto_data(ticker=stock_code, days=args.days, intervals=intervals, base_interval=intervals[0])
+        else:
+            # 파일 경로는 data/{symbol}_hourly.csv 형식으로 가정
+            chart_data = data_manager.load_crypto_data(
+                fpath=f'data/{stock_code}_hourly.csv',
+                date_from=args.start_date,
+                date_to=args.end_date
+            )
 
         # 전처리
         chart_data = data_manager.preprocess_crypto_data(chart_data)
@@ -153,6 +161,10 @@ if __name__ == '__main__':
             elif args.rl_method == 'a2c':
                 learner = A2CLearner(**{**common_params, 
                     'value_network_path': value_network_path, 
+                    'policy_network_path': policy_network_path})
+            elif args.rl_method == 'ppo':
+                learner = PPOLearner(**{**common_params,
+                    'value_network_path': value_network_path,
                     'policy_network_path': policy_network_path})
             elif args.rl_method == 'monkey':
                 common_params['net'] = args.rl_method

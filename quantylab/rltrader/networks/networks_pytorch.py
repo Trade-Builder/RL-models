@@ -106,8 +106,19 @@ class Network:
                     torch.nn.init.normal_(weight, std=0.01)
 
     def save_model(self, model_path):
-        if model_path is not None and self.model is not None:
+        if model_path is None:
+            return
+        try:
+            # prefer saving full model for convenience
             torch.save(self.model, model_path)
+        except Exception:
+            # fallback: save state_dict
+            try:
+                torch.save(self.model.state_dict(), model_path + '.state_dict')
+            except Exception:
+                # last resort: write a warning file
+                with open(model_path + '.save_error', 'w') as f:
+                    f.write('Failed to save model or state_dict')
 
     def load_model(self, model_path):
         if model_path is not None:
@@ -115,10 +126,20 @@ class Network:
             # reject full-model checkpoints saved previously. Set weights_only=False
             # to preserve backward compatibility (trusted local file).
             try:
-                self.model = torch.load(model_path, weights_only=False)
-            except TypeError:
-                # older torch versions don't have weights_only arg
-                self.model = torch.load(model_path)
+                # try to load full model object
+                try:
+                    self.model = torch.load(model_path, weights_only=False)
+                except TypeError:
+                    self.model = torch.load(model_path)
+            except Exception:
+                # fallback: try to load state_dict
+                sd_path = model_path + '.state_dict'
+                try:
+                    state = torch.load(sd_path, map_location=device)
+                    self.model.load_state_dict(state)
+                except Exception:
+                    # unable to load model; leave model as-is
+                    pass
     
 class DNN(Network):
     @staticmethod

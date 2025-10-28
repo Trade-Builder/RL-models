@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+from pathlib import Path
+from quantylab.rltrader.data_upbit import UpbitDataCollector
 
 COLUMNS_CRYPTO_DATA = [
     'date', 'open', 'high', 'low', 'close', 'volume',
@@ -78,3 +80,77 @@ def split_data(df, train_ratio=0.8):
     val_df = df[split_idx:]
     
     return train_df, val_df
+
+
+def load_multi_tf_crypto_data(ticker="KRW-BTC", days=365,
+                              intervals=None, base_interval='minute1'):
+    """Collect multi-timeframe data from Upbit and merge into a single DataFrame.
+
+    intervals: list of upbit interval strings, e.g. ['minute1','minute5','minute15','minute60','minute240','day']
+    base_interval: the smallest timeframe to align rows to (default 'minute1')
+    """
+    if intervals is None:
+        intervals = ['minute1', 'minute5', 'minute15', 'minute60', 'minute240', 'day']
+
+    collector = UpbitDataCollector(ticker=ticker)
+    dfs = {}
+    # collect and compute indicators per timeframe
+    for interval in intervals:
+        print(f"Collecting {interval} for {ticker} ...")
+        df = collector.collect_large_dataset(interval=interval, days=days)
+        if df is None or df.empty:
+            print(f"Warning: no data for {interval}")
+            continue
+        df_ind = collector.add_technical_indicators(df)
+        # keep base interval columns unchanged so Environment.get_price() finds 'close'
+        suffix = interval.replace('minute', 'm').replace('hour', 'h')
+        if interval == 'day':
+            suffix = 'd1'
+        df_ind = df_ind.reset_index().rename(columns={'index': 'date'})
+        if interval != base_interval:
+            # normalize column names to include timeframe suffix for non-base intervals
+            df_ind = df_ind.rename(columns={c: f"{c}_{suffix}" for c in df_ind.columns if c not in ['date']})
+        dfs[interval] = df_ind
+
+    # align everything to base interval timestamps using left join + ffill
+    if base_interval not in dfs:
+        # pick smallest available interval
+        base_interval = sorted(dfs.keys(), key=lambda x: len(x))[0]
+
+    base_df = dfs[base_interval].copy()
+    base_df['date'] = pd.to_datetime(base_df['date'])
+    base_df = base_df.sort_values('date').reset_index(drop=True)
+
+    # for each other timeframe, merge on nearest previous timestamp (ffill after merge)
+    merged = base_df
+    for interval, df_tf in dfs.items():
+        if interval == base_interval:
+            continue
+        df_tf['date'] = pd.to_datetime(df_tf['date'])
+        # merge_asof to align previous timeframe values to base timestamps
+        merged = pd.merge_asof(merged.sort_values('date'), df_tf.sort_values('date'), on='date')
+
+    # final cleanup
+    merged = merged.replace([np.inf, -np.inf], np.nan).dropna()
+    # ensure date column exists
+    if 'date' in merged.columns:
+        merged['date'] = pd.to_datetime(merged['date'])
+    return merged
+
+
+def compute_multi_tf_features(merged_df):
+    """Placeholder for extra feature engineering combining multi-tf columns.
+    Currently this function passes through the merged dataframe, but can be extended
+    to add cross-timeframe ratios, aggregated volume signals, etc.
+    """
+    df = merged_df.copy()
+    # Example: compute volume ratio across timeframes if present
+    # If minute and hourly volume columns exist, create normalized ratios
+    vol_cols = [c for c in df.columns if c.startswith('volume')]
+    # create simple normalized volume features
+    for c in vol_cols:
+        try:
+            df[f'{c}_z'] = (df[c] - df[c].rolling(100).mean()) / (df[c].rolling(100).std() + 1e-9)
+        except Exception:
+            df[f'{c}_z'] = df[c]
+    return df
