@@ -9,9 +9,34 @@ deployer = ModelDeployer(model_name='20251027124731', model_dir='models/best')
 is_initialized = False
 
 def init_model_single_tf(data):
-    """Initialize model with single timeframe data (list of closes)"""
+    """Initialize model with single timeframe data
+    
+    Supports two formats:
+    1. Simple (close only): [close1, close2, ..., close200]
+    2. OHLCV (dict): {
+        'close': [...],
+        'open': [...],   # optional
+        'high': [...],   # optional
+        'low': [...],    # optional
+        'volume': [...]  # optional
+    }
+    """
     global is_initialized
-    deployer.load_initial_closes(data)
+    
+    # Check if data is dict (OHLCV) or list (close only)
+    if isinstance(data, dict):
+        # OHLCV 형식
+        closes = data.get('close')
+        opens = data.get('open')
+        highs = data.get('high')
+        lows = data.get('low')
+        volumes = data.get('volume')
+        
+        deployer.load_initial_ohlcv(closes, opens, highs, lows, volumes)
+    else:
+        # 단순 close 리스트
+        deployer.load_initial_closes(data)
+    
     is_initialized = True
     return {"status": "initialized", "method": "single_timeframe"}
 

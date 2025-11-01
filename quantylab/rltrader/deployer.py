@@ -9,20 +9,33 @@ from quantylab.rltrader.environment import Environment
 from quantylab.rltrader.agent import Agent
 
 
-def compute_features_from_closes(closes: List[float]) -> pd.DataFrame:
+def compute_features_from_closes(closes: List[float], 
+                                opens: Optional[List[float]] = None,
+                                highs: Optional[List[float]] = None, 
+                                lows: Optional[List[float]] = None,
+                                volumes: Optional[List[float]] = None) -> pd.DataFrame:
     """
-    주어진 종가 시간열로부터 학습에 사용 가능한 기술적 지표들을 계산합니다.
+    주어진 OHLCV 데이터로부터 학습에 사용 가능한 기술적 지표들을 계산합니다.
 
-    closes: 과거->최신 순서의 종가 리스트 또는 배열. 길이는 200 권장.
-    반환: feature DataFrame (index 순서 동일, 26개 features for model input)
+    Args:
+        closes: 과거->최신 순서의 종가 리스트 (필수)
+        opens: 시가 리스트 (선택, 없으면 close로 대체)
+        highs: 고가 리스트 (선택, 없으면 close로 대체)
+        lows: 저가 리스트 (선택, 없으면 close로 대체)
+        volumes: 거래량 리스트 (선택, 없으면 0으로 설정)
+        
+    Returns: 
+        feature DataFrame (23개 features for model input)
     """
     s = pd.Series(closes).astype(float)
+    
+    # OHLCV 설정 (실제 데이터가 있으면 사용, 없으면 fallback)
     df = pd.DataFrame({
         'close': s,
-        'open': s,  # close로 대체
-        'high': s,  # close로 대체
-        'low': s,   # close로 대체
-        'volume': 0  # 더미 값
+        'open': pd.Series(opens).astype(float) if opens is not None else s,
+        'high': pd.Series(highs).astype(float) if highs is not None else s,
+        'low': pd.Series(lows).astype(float) if lows is not None else s,
+        'volume': pd.Series(volumes).astype(float) if volumes is not None else 0
     })
 
     # OHLC 비율들
@@ -33,13 +46,19 @@ def compute_features_from_closes(closes: List[float]) -> pd.DataFrame:
     # 변화율
     df['diffratio'] = df['close'].pct_change()
     
-    # 거래량 비율 (더미 값)
-    df['volume_lastvolume_ratio'] = 0
+    # 거래량 비율
+    if volumes is not None:
+        df['volume_lastvolume_ratio'] = df['volume'] / df['volume'].shift(1)
+    else:
+        df['volume_lastvolume_ratio'] = 0
 
     # 이동평균 비율들 (close & volume)
     for ma in (5, 10, 20, 60, 120):
         df[f'close_ma{ma}_ratio'] = df['close'] / df['close'].rolling(ma).mean()
-        df[f'volume_ma{ma}_ratio'] = 0  # 더미 값
+        if volumes is not None:
+            df[f'volume_ma{ma}_ratio'] = df['volume'] / df['volume'].rolling(ma).mean()
+        else:
+            df[f'volume_ma{ma}_ratio'] = 0
 
     # Bollinger Band ratio (20)
     ma20 = df['close'].rolling(20).mean()
@@ -166,14 +185,54 @@ class ModelDeployer:
         self.value_path = value_path if value_path and os.path.exists(value_path) else None
 
     def load_initial_closes(self, closes: List[float]):
-        """초기 과거 데이터(최소 120~200 권장)를 로드하여 내부 상태를 초기화합니다."""
+        """초기 과거 데이터(최소 120~200 권장)를 로드하여 내부 상태를 초기화합니다.
+        
+        WARNING: OHLCV 데이터가 없으므로 더미 값 사용. 정확도 저하 가능.
+        실제 데이터 사용 시 load_initial_ohlcv() 사용 권장.
+        """
         assert len(closes) > 0
         self.closes = list(map(float, closes))
-        # 전처리해서 chart_data 생성
+        # 전처리해서 chart_data 생성 (OHLCV 더미)
         features = compute_features_from_closes(self.closes)
         self.chart_data = features
 
         # 환경/에이전트 초기화
+        self._initialize_environment_and_models(features)
+    
+    def load_initial_ohlcv(self, closes: List[float], 
+                          opens: Optional[List[float]] = None,
+                          highs: Optional[List[float]] = None,
+                          lows: Optional[List[float]] = None,
+                          volumes: Optional[List[float]] = None):
+        """초기 OHLCV 데이터를 로드하여 내부 상태를 초기화합니다.
+        
+        Args:
+            closes: 종가 리스트 (필수)
+            opens: 시가 리스트 (선택)
+            highs: 고가 리스트 (선택)
+            lows: 저가 리스트 (선택)
+            volumes: 거래량 리스트 (선택)
+            
+        Note: 실제 데이터 사용 시 이 메서드 사용 권장 (정확도 향상)
+        """
+        assert len(closes) > 0
+        self.closes = list(map(float, closes))
+        
+        # 전처리해서 chart_data 생성 (실제 OHLCV 사용)
+        features = compute_features_from_closes(
+            self.closes, 
+            opens=opens, 
+            highs=highs, 
+            lows=lows, 
+            volumes=volumes
+        )
+        self.chart_data = features
+        
+        # 환경/에이전트 초기화
+        self._initialize_environment_and_models(features)
+    
+    def _initialize_environment_and_models(self, features: pd.DataFrame):
+        """환경, 에이전트, 모델 초기화 (공통 로직)"""
         self.environment = Environment(self.chart_data)
         self.environment.reset()
         self.environment.initial_balance = self.initial_balance
