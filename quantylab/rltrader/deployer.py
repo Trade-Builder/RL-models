@@ -331,6 +331,44 @@ class ModelDeployer:
             action = Agent.ACTION_HOLD
             confidence = 0.0
 
+        # 포트폴리오 상태에 따른 액션 필터링
+        # 보유 자산이 없을 때 SELL 방지
+        if self.agent.num_stocks == 0 and action == Agent.ACTION_SELL:
+            # SELL 불가능 -> 차선책으로 BUY 또는 HOLD 선택
+            if pred_policy is not None:
+                # Policy 출력에서 SELL 제외하고 다음으로 높은 액션 선택
+                pred_copy = pred_policy.copy()
+                pred_copy[Agent.ACTION_SELL] = -np.inf  # SELL 배제
+                action = int(np.argmax(pred_copy))
+                confidence = float(pred_policy[action])  # 원본 신뢰도 사용
+            elif pred_value is not None:
+                # Value 출력에서 SELL 제외하고 다음으로 높은 액션 선택
+                val_copy = pred_value.copy()
+                val_copy[Agent.ACTION_SELL] = -np.inf
+                action = int(np.argmax(val_copy))
+                confidence = 1.0 / (1.0 + np.exp(-float(pred_value[action])))
+            else:
+                # 모델 없으면 기본적으로 HOLD
+                action = Agent.ACTION_HOLD
+                confidence = 0.0
+        
+        # 잔고가 부족할 때 BUY 방지
+        elif self.agent.balance < self.agent.min_trading_price and action == Agent.ACTION_BUY:
+            # BUY 불가능 -> 차선책으로 SELL 또는 HOLD 선택
+            if pred_policy is not None:
+                pred_copy = pred_policy.copy()
+                pred_copy[Agent.ACTION_BUY] = -np.inf  # BUY 배제
+                action = int(np.argmax(pred_copy))
+                confidence = float(pred_policy[action])
+            elif pred_value is not None:
+                val_copy = pred_value.copy()
+                val_copy[Agent.ACTION_BUY] = -np.inf
+                action = int(np.argmax(val_copy))
+                confidence = 1.0 / (1.0 + np.exp(-float(pred_value[action])))
+            else:
+                action = Agent.ACTION_HOLD
+                confidence = 0.0
+
         # 매매 수량 결정
         trade_unit = float(self.agent.decide_trading_unit(confidence))
 
