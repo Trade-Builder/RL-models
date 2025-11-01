@@ -60,14 +60,59 @@ def load_crypto_data(fpath, date_from=None, date_to=None):
 
 def preprocess_crypto_data(df):
     """
-    데이터 전처리
+    데이터 전처리 및 기술적 지표 계산
     """
     # 인덱스 초기화
     df = df.reset_index(drop=True)
     
+    # OHLCV 기본 컬럼이 있는지 확인
+    required_cols = ['open', 'high', 'low', 'close', 'volume']
+    if all(col in df.columns for col in required_cols):
+        # 기술적 지표 계산
+        
+        # 1. OHLC 비율들
+        df['open_lastclose_ratio'] = df['open'] / df['close'].shift(1)
+        df['high_close_ratio'] = df['high'] / df['close']
+        df['low_close_ratio'] = df['low'] / df['close']
+        
+        # 2. 변화율
+        df['diffratio'] = df['close'].pct_change()
+        
+        # 3. 거래량 비율
+        df['volume_lastvolume_ratio'] = df['volume'] / df['volume'].shift(1)
+        
+        # 4. 이동평균 비율들
+        for ma in (5, 10, 20, 60, 120):
+            df[f'close_ma{ma}_ratio'] = df['close'] / df['close'].rolling(ma).mean()
+            df[f'volume_ma{ma}_ratio'] = df['volume'] / df['volume'].rolling(ma).mean()
+        
+        # 5. Bollinger Band ratio (20)
+        ma20 = df['close'].rolling(20).mean()
+        std20 = df['close'].rolling(20).std()
+        upper = ma20 + 2 * std20
+        lower = ma20 - 2 * std20
+        df['bb_ratio_20'] = (df['close'] - lower) / (upper - lower)
+        
+        # 6. RSI(14)
+        delta = df['close'].diff()
+        up = delta.clip(lower=0)
+        down = -delta.clip(upper=0)
+        roll_up = up.rolling(14).mean()
+        roll_down = down.rolling(14).mean()
+        rs = roll_up / roll_down.replace(0, np.nan)
+        df['rsi_14'] = 100 - (100 / (1 + rs))
+        
+        # 7. MACD diff (12/26, signal 9)
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        macd_signal = macd.ewm(span=9, adjust=False).mean()
+        df['macd_diff'] = macd - macd_signal
+    
     # 무한대 값 제거
     df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.dropna()
+    # 결측치는 앞뒤 보간 후 0으로 채움
+    df = df.bfill().ffill().fillna(0)
     
     return df
 

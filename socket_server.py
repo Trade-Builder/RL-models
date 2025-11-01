@@ -14,7 +14,7 @@ def init_model_single_tf(data):
     Supports two formats:
     1. Simple (close only): [close1, close2, ..., close200]
     2. OHLCV (dict): {
-        'close': [...],
+        'close': [...],888888888888
         'open': [...],   # optional
         'high': [...],   # optional
         'low': [...],    # optional
@@ -97,6 +97,39 @@ def run_model_multi_tf(idx, tf_data, base_interval='minute1'):
         'base_interval': base_interval
     }
 
+def set_portfolio_state(num_stocks, balance, avg_buy_price=None):
+    """Set portfolio state for simulation
+    
+    Args:
+        num_stocks: Number of coins held (e.g., 0.5 BTC)
+        balance: Cash balance (e.g., 50000000)
+        avg_buy_price: Average buy price (optional, defaults to current price)
+    
+    Example:
+    {
+        "action": "set_portfolio",
+        "num_stocks": 0.5,
+        "balance": 50000000,
+        "avg_buy_price": 65000000
+    }
+    """
+    global is_initialized
+    assert is_initialized, "Model not initialized. Call 'init' first."
+    
+    deployer.set_portfolio_state(
+        num_stocks=float(num_stocks),
+        balance=float(balance) if balance is not None else None,
+        avg_buy_price=float(avg_buy_price) if avg_buy_price is not None else None
+    )
+    
+    return {
+        "status": "portfolio_set",
+        "num_stocks": deployer.agent.num_stocks,
+        "balance": deployer.agent.balance,
+        "avg_buy_price": deployer.agent.avg_buy_price,
+        "portfolio_value": deployer.agent.portfolio_value
+    }
+
 def handle_server(request):
     """Handle WebSocket requests
     
@@ -166,6 +199,12 @@ def handle_server(request):
             return {"status": "success", "result": run_model_multi_tf(idx, data, base_interval)}
         else:
             raise ValueError(f"Unknown run method: {method}")
+    
+    elif action == 'set_portfolio':
+        num_stocks = request.get('num_stocks', 0.0)
+        balance = request.get('balance')
+        avg_buy_price = request.get('avg_buy_price')
+        return set_portfolio_state(num_stocks, balance, avg_buy_price)
     
     elif action == 'status':
         return {
