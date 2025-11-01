@@ -14,28 +14,38 @@ def compute_features_from_closes(closes: List[float]) -> pd.DataFrame:
     주어진 종가 시간열로부터 학습에 사용 가능한 기술적 지표들을 계산합니다.
 
     closes: 과거->최신 순서의 종가 리스트 또는 배열. 길이는 200 권장.
-    반환: feature DataFrame (index 순서 동일)
+    반환: feature DataFrame (index 순서 동일, 26개 features for model input)
     """
     s = pd.Series(closes).astype(float)
-    df = pd.DataFrame({'close': s})
+    df = pd.DataFrame({
+        'close': s,
+        'open': s,  # close로 대체
+        'high': s,  # close로 대체
+        'low': s,   # close로 대체
+        'volume': 0  # 더미 값
+    })
 
+    # OHLC 비율들
+    df['open_lastclose_ratio'] = df['open'] / df['close'].shift(1)
+    df['high_close_ratio'] = df['high'] / df['close']
+    df['low_close_ratio'] = df['low'] / df['close']
+    
     # 변화율
-    df['diffratio'] = df['close'].pct_change().fillna(0)
+    df['diffratio'] = df['close'].pct_change()
+    
+    # 거래량 비율 (더미 값)
+    df['volume_lastvolume_ratio'] = 0
 
-    # 이동평균 비율들
+    # 이동평균 비율들 (close & volume)
     for ma in (5, 10, 20, 60, 120):
-        col_ma = f'close_ma{ma}'
-        col_ratio = f'close_ma{ma}_ratio'
-        df[col_ma] = df['close'].rolling(ma).mean()
-        # ratio: close / ma
-        df[col_ratio] = df['close'] / df[col_ma]
+        df[f'close_ma{ma}_ratio'] = df['close'] / df['close'].rolling(ma).mean()
+        df[f'volume_ma{ma}_ratio'] = 0  # 더미 값
 
     # Bollinger Band ratio (20)
     ma20 = df['close'].rolling(20).mean()
     std20 = df['close'].rolling(20).std()
     upper = ma20 + 2 * std20
     lower = ma20 - 2 * std20
-    # 클로즈가 lower~upper 사이에서 어느 위치인지 0..1로 정규화
     df['bb_ratio_20'] = (df['close'] - lower) / (upper - lower)
 
     # RSI(14)
@@ -55,18 +65,11 @@ def compute_features_from_closes(closes: List[float]) -> pd.DataFrame:
     df['macd_diff'] = macd - macd_signal
 
     # 결측 처리: 앞뒤로 보간 후 0으로 채움
-    df = df.fillna(method='bfill').fillna(method='ffill').fillna(0)
+    df = df.bfill().ffill().fillna(0)
 
-    # 선택된 feature만 반환 (훈련 시 사용한 컬럼의 교차집합)
-    features = {}
-    for col in COLUMNS_CRYPTO_DATA:
-        if col == 'date':
-            continue
-        if col in df.columns:
-            # 컬럼이 존재하면 사용
-            features[col] = df[col]
-    features_df = pd.DataFrame(features)
-    return features_df
+    # COLUMNS_CRYPTO_DATA 순서대로 반환 (date 제외한 23개)
+    result_cols = [col for col in COLUMNS_CRYPTO_DATA if col != 'date']
+    return df[result_cols]
 
 
 def _compute_indicators_for_tf(closes: List[float], volumes: List[float]) -> pd.DataFrame:
@@ -178,41 +181,33 @@ class ModelDeployer:
         self.environment.observe()
         self.agent = Agent(self.environment, self.initial_balance, self.min_trading_price, self.max_trading_price)
         # 초기 에이전트 상태 초기화 (포트폴리오 가치 등)
-        try:
-            self.agent.reset()
-        except Exception:
-            pass
+        self.agent.reset()
 
         # 모델 로드
         self.load_models()
         num_features = (features.shape[1] if features is not None else 0) + self.agent.STATE_DIM
         # 정책 네트워크 래퍼 생성 및 로드
         if self.policy_path is not None:
-            self.policy = DNN(input_dim=num_features, output_dim=self.agent.NUM_ACTIONS, lr=0.0001)
-            try:
-                self.policy.load_model(self.policy_path)
-            except Exception:
-                # fallback: try to load raw torch module
-                import torch
-                self.policy = torch.load(self.policy_path, weights_only=False)
+            print(f"deployer: loading policy model from {self.policy_path}")
+            import torch
+            self.policy = torch.load(self.policy_path, weights_only=False)
             # Set model to evaluation mode
             if hasattr(self.policy, 'eval'):
                 self.policy.eval()
             if hasattr(self.policy, 'model') and hasattr(self.policy.model, 'eval'):
                 self.policy.model.eval()
+            print(f"deployer: policy model loaded successfully")
         # 가치 네트워크는 선택적
         if self.value_path is not None:
-            self.value = DNN(input_dim=num_features, output_dim=self.agent.NUM_ACTIONS, lr=0.0001)
-            try:
-                self.value.load_model(self.value_path)
-            except Exception:
-                import torch
-                self.value = torch.load(self.value_path, weights_only=False)
+            print(f"deployer: loading value model from {self.value_path}")
+            import torch
+            self.value = torch.load(self.value_path, weights_only=False)
             # Set model to evaluation mode
             if hasattr(self.value, 'eval'):
                 self.value.eval()
             if hasattr(self.value, 'model') and hasattr(self.value.model, 'eval'):
                 self.value.model.eval()
+            print(f"deployer: value model loaded successfully")
 
     def _append_close_and_update(self, close: float):
         self.closes.append(float(close))
@@ -253,22 +248,16 @@ class ModelDeployer:
         pred_policy = None
         pred_value = None
         if self.policy is not None:
-            try:
-                pred_policy = self.policy.predict(sample)
-            except Exception:
-                # if policy is a raw torch model
-                import torch
-                x = torch.from_numpy(sample).float()
-                out = self.policy(x).detach().cpu().numpy().flatten()
-                pred_policy = out
+            # Use raw torch model directly
+            import torch
+            x = torch.from_numpy(sample).float()
+            out = self.policy(x).detach().cpu().numpy().flatten()
+            pred_policy = out
         if self.value is not None and pred_policy is None:
-            try:
-                pred_value = self.value.predict(sample)
-            except Exception:
-                import torch
-                x = torch.from_numpy(sample).float()
-                out = self.value(x).detach().cpu().numpy().flatten()
-                pred_value = out
+            import torch
+            x = torch.from_numpy(sample).float()
+            out = self.value(x).detach().cpu().numpy().flatten()
+            pred_value = out
 
         # 결정
         if pred_policy is not None:
@@ -337,29 +326,9 @@ class ModelDeployer:
                 if close_cols:
                     self.chart_data['close'] = self.chart_data[close_cols[-1]]
 
-        # Ensure close is a valid positive value; if not, try to pick a non-zero close from other TFs
-        try:
-            close_val = float(self.chart_data['close'].iloc[0])
-        except Exception:
-            close_val = 0.0
-        if close_val <= 0:
-            # find any close-like column with positive value
-            close_cols = [c for c in self.chart_data.columns if c.startswith('close')]
-            found = False
-            for c in close_cols:
-                try:
-                    v = float(self.chart_data[c].iloc[0])
-                except Exception:
-                    v = 0.0
-                if v > 0:
-                    self.chart_data['close'] = self.chart_data[c]
-                    found = True
-                    print(f"deployer: using fallback close column '{c}' with value {v}")
-                    break
-            if not found:
-                # final fallback: set to 1.0 to avoid division by zero and clearly signal invalid price
-                self.chart_data['close'] = 1.0
-                print("deployer: warning - no valid close value found in initial multi-tf data; using close=1.0 to avoid division by zero")
+        # Validate close value
+        close_val = float(self.chart_data['close'].iloc[0])
+        assert close_val > 0, f"deployer: invalid close value: {close_val}"
 
         self.environment = Environment(self.chart_data)
         self.environment.reset()
