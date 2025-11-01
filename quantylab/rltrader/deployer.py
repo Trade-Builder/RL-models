@@ -174,6 +174,8 @@ class ModelDeployer:
         self.environment = Environment(self.chart_data)
         self.environment.reset()
         self.environment.initial_balance = self.initial_balance
+        # Call observe to set the current observation (needed for get_price())
+        self.environment.observe()
         self.agent = Agent(self.environment, self.initial_balance, self.min_trading_price, self.max_trading_price)
         # 초기 에이전트 상태 초기화 (포트폴리오 가치 등)
         try:
@@ -192,7 +194,12 @@ class ModelDeployer:
             except Exception:
                 # fallback: try to load raw torch module
                 import torch
-                self.policy = torch.load(self.policy_path)
+                self.policy = torch.load(self.policy_path, weights_only=False)
+            # Set model to evaluation mode
+            if hasattr(self.policy, 'eval'):
+                self.policy.eval()
+            if hasattr(self.policy, 'model') and hasattr(self.policy.model, 'eval'):
+                self.policy.model.eval()
         # 가치 네트워크는 선택적
         if self.value_path is not None:
             self.value = DNN(input_dim=num_features, output_dim=self.agent.NUM_ACTIONS, lr=0.0001)
@@ -200,7 +207,12 @@ class ModelDeployer:
                 self.value.load_model(self.value_path)
             except Exception:
                 import torch
-                self.value = torch.load(self.value_path)
+                self.value = torch.load(self.value_path, weights_only=False)
+            # Set model to evaluation mode
+            if hasattr(self.value, 'eval'):
+                self.value.eval()
+            if hasattr(self.value, 'model') and hasattr(self.value.model, 'eval'):
+                self.value.model.eval()
 
     def _append_close_and_update(self, close: float):
         self.closes.append(float(close))
@@ -287,43 +299,27 @@ class ModelDeployer:
         tf_data: mapping from interval string (e.g. 'minute1', 'minute5') to dict with keys:
             'close': list[float], 'volume': list[float]
         All lists should be ordered from oldest->newest and length >= 120 (권장 200).
+        
+        NOTE: This model was trained on single timeframe data, so only base_interval is used for prediction.
+        Other timeframes are ignored.
         """
-        # compute per-tf indicators
-        dfs = {}
-        for interval, data in tf_data.items():
-            closes = data.get('close', [])
-            volumes = data.get('volume', [0] * len(closes))
-            df_ind = _compute_indicators_for_tf(closes, volumes)
-            suffix = interval.replace('minute', 'm').replace('hour', 'h')
-            if interval == 'day':
-                suffix = 'd1'
-            df_ind = df_ind.reset_index().rename(columns={'index': 'date'})
-            if interval != base_interval:
-                df_ind = df_ind.rename(columns={c: f"{c}_{suffix}" for c in df_ind.columns if c not in ['date']})
-            dfs[interval] = df_ind
-
-        # align by index positions: take last row from each tf and merge into single-row df
-        last_rows = {}
-        for interval, df in dfs.items():
-            last = df.iloc[-1:].reset_index(drop=True)
-            # prefix columns accordingly
-            last_rows[interval] = last
-
-        # build merged single-row
-        merged = pd.DataFrame()
-        for interval, row in last_rows.items():
-            for col in row.columns:
-                if col == 'date':
-                    merged[col] = row[col]
-                else:
-                    # ensure unique column names
-                    merged[col] = row[col]
-
+        # Extract base interval data only (model was trained on single TF)
+        if base_interval not in tf_data:
+            raise ValueError(f"base_interval '{base_interval}' not found in tf_data keys: {list(tf_data.keys())}")
+        
+        base_data = tf_data[base_interval]
+        closes = base_data.get('close', [])
+        volumes = base_data.get('volume', [0] * len(closes))
+        
+        # Compute indicators for base interval only
+        df_ind = _compute_indicators_for_tf(closes, volumes)
+        df_ind = df_ind.reset_index().rename(columns={'index': 'date'})
+        
+        # Take last row as initial state
+        self.chart_data = df_ind.iloc[-1:].reset_index(drop=True)
+        
         # final cleanup
-        merged = merged.replace([np.inf, -np.inf], np.nan).fillna(0)
-
-        # set chart_data as merged (single row)
-        self.chart_data = merged
+        self.chart_data = self.chart_data.replace([np.inf, -np.inf], np.nan).fillna(0)
 
         # initialize environment and agent (environment expects 'close' for price)
         # if base_interval produced 'close' column (no suffix), good; otherwise try to map
@@ -368,6 +364,8 @@ class ModelDeployer:
         self.environment = Environment(self.chart_data)
         self.environment.reset()
         self.environment.initial_balance = self.initial_balance
+        # Call observe to set the current observation (needed for get_price())
+        self.environment.observe()
         self.agent = Agent(self.environment, self.initial_balance, self.min_trading_price, self.max_trading_price)
         # 초기 에이전트 상태 초기화
         try:
@@ -386,9 +384,14 @@ class ModelDeployer:
             try:
                 import torch
                 # attempt to load full model object
-                loaded = torch.load(self.policy_path)
+                loaded = torch.load(self.policy_path, weights_only=False)
                 # if loaded is a Network wrapper with predict, keep it; otherwise it's likely a raw torch.nn.Module
                 self.policy = loaded
+                # Set model to evaluation mode
+                if hasattr(self.policy, 'eval'):
+                    self.policy.eval()
+                if hasattr(self.policy, 'model') and hasattr(self.policy.model, 'eval'):
+                    self.policy.model.eval()
                 # try to infer expected input dim from first BatchNorm1d (if present)
                 try:
                     bn_dim = None
@@ -411,6 +414,11 @@ class ModelDeployer:
                 except Exception:
                     # if loading failed, leave wrapper as-is
                     pass
+                # Set model to evaluation mode
+                if hasattr(self.policy, 'eval'):
+                    self.policy.eval()
+                if hasattr(self.policy, 'model') and hasattr(self.policy.model, 'eval'):
+                    self.policy.model.eval()
                 # try to infer actual input dim from the (possibly replaced) model's BatchNorm
                 try:
                     bn_dim = None
@@ -435,59 +443,28 @@ class ModelDeployer:
     def on_new_multi_tf(self, tf_latest: Dict[str, Dict[str, float]], base_interval: str = 'minute1', execute: bool = False):
         """Accepts a dict mapping interval -> {'close': float, 'volume': float} for latest tick and returns action.
         This updates internal chart_data by recomputing last-row indicators and predicting.
+        
+        NOTE: This model was trained on single timeframe data, so only base_interval is used for prediction.
+        Other timeframes are ignored.
         """
         assert self.chart_data is not None, 'call load_initial_multi_tf first'
-        # for each tf, append latest and recompute last row
-        new_values = {}
-        for interval, data in tf_latest.items():
-            close = float(data.get('close', 0.0))
-            vol = float(data.get('volume', 0.0))
-            # compute indicator row by creating tiny series
-            df_ind = _compute_indicators_for_tf([close], [vol])
-            suffix = interval.replace('minute', 'm').replace('hour', 'h')
-            if interval == 'day':
-                suffix = 'd1'
-            row = df_ind.iloc[-1:].reset_index(drop=True)
-            if interval != base_interval:
-                row = row.rename(columns={c: f"{c}_{suffix}" for c in row.columns if c not in ['date']})
-            for col in row.columns:
-                if col == 'date':
-                    new_values[col] = row[col].iloc[0]
-                else:
-                    new_values[col] = row[col].iloc[0]
-
-        # update chart_data last row
-        for k, v in new_values.items():
-            self.chart_data.at[0, k] = v
-
-        # after updating, ensure 'close' is valid and update from TF close columns if necessary
-        try:
-            cur_close = float(self.chart_data.get('close', 0.0).iloc[0]) if 'close' in self.chart_data.columns else 0.0
-        except Exception:
-            cur_close = 0.0
-        if cur_close <= 0:
-            # prefer base_interval close if present in new_values
-            base_suffix = base_interval.replace('minute', 'm').replace('hour', 'h')
-            if base_interval == 'day':
-                base_suffix = 'd1'
-            mapped = f'close_{base_suffix}'
-            if mapped in new_values and float(new_values[mapped]) > 0:
-                self.chart_data.at[0, 'close'] = float(new_values[mapped])
-            else:
-                # find any close_* in chart_data
-                close_cols = [c for c in self.chart_data.columns if c.startswith('close')]
-                for c in close_cols:
-                    try:
-                        v = float(self.chart_data[c].iloc[0])
-                    except Exception:
-                        v = 0.0
-                    if v > 0:
-                        self.chart_data.at[0, 'close'] = v
-                        break
-                else:
-                    # last-resort fallback
-                    self.chart_data.at[0, 'close'] = 1.0
-                    print("deployer: warning - no valid close in updated multi-tf tick; using close=1.0")
+        
+        # Use only base_interval data (model was trained on single TF)
+        if base_interval not in tf_latest:
+            raise ValueError(f"base_interval '{base_interval}' not found in tf_latest keys: {list(tf_latest.keys())}")
+        
+        base_data = tf_latest[base_interval]
+        close = float(base_data.get('close', 0.0))
+        vol = float(base_data.get('volume', 0.0))
+        
+        # Compute indicator row for base interval only
+        df_ind = _compute_indicators_for_tf([close], [vol])
+        new_row = df_ind.iloc[-1:].reset_index(drop=True)
+        
+        # Update chart_data with new values
+        for col in new_row.columns:
+            if col in self.chart_data.columns:
+                self.chart_data.at[0, col] = new_row[col].iloc[0]
 
         # build sample and predict using same logic as on_new_close
         feature_cols = [c for c in self.chart_data.columns if c != 'date']
