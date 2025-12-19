@@ -218,7 +218,11 @@ def handle_server(request):
 
 def run_server(handler):
     def message_received(client, server, message):
-        response = handler(json.loads(message))
+        print(f"메시지 수신: {message}")
+        message = json.loads(message)
+        messageId = message['messageId']
+        response = handler(message)
+        response['messageId'] = messageId
         response_text = json.dumps(response)
         server.send_message(client, response_text)
 

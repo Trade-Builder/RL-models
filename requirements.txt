@@ -36,4 +36,4 @@ tqdm>=4.65.0              # 진행률 표시
 # =====================================================================
 python-dateutil>=2.8.2    # 날짜/시간 처리
 pytz>=2023.3              # 시간대 처리
-WebsocketServer>=0.6.1    # WebSocket 서버
+websocket-server>=0.6.1    # WebSocket 서버
